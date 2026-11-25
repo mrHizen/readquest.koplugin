@@ -21,6 +21,7 @@ Turn every reading session, daily goal, streak, and finished book into a lightwe
   * Unlock achievements across reading milestones (first credited page, 100 pages, 1,000 pages, 5,000 pages) and book boss victories.
 * **E-Ink Friendly Controls & Customization**
   * Optional status bar text showing level and progress, plus compact bottom-right `+EXP` toast badges on page turns.
+  * A summary appears when you exit a book you've just finished reading, including: how long you read and how many pages you've read.
   * Adjustable popup duration to minimize e-ink ghosting.
   * Built-in **Screenshot** button directly inside achievement and daily quest popups so you can capture milestones cleanly without accidentally dismissing the dialog.
   * Language selection (English / Vietnamese) and character reset option in **Settings**.
@@ -30,6 +31,7 @@ Turn every reading session, daily goal, streak, and finished book into a lightwe
 ## Screenshots
 
 <p align="center">
+ <img width="2448" height="3264" alt="33742" src="https://github.com/user-attachments/assets/6e64cbd4-ac89-413a-80e4-9068ac686c70" />
   <img src="https://github.com/user-attachments/assets/07ee472d-7460-4913-94c5-76704c1d9e13" alt="ReadQuest" width="240" />
   <img src="https://github.com/user-attachments/assets/0a5dfc4f-f15f-4926-b346-005d417e66fd" alt="ReadQuest" width="240" />
   <img src="https://github.com/user-attachments/assets/df4f6a95-1594-4aeb-8787-4994f7eb153a" alt="ReadQuest" width="240" />
