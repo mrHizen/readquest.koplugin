@@ -6,7 +6,7 @@ local I18N = require("readquest_i18n")
 
 local Core = {}
 
-Core.VERSION = "2.4"
+Core.VERSION = "2.5.2"
 Core.BASE_EXP = 10
 Core.ACH_EXP = 150
 Core.BOSS_END_RATIO = 0.97
@@ -21,6 +21,7 @@ Core.DEFAULT_CFG = {
     toast_detail = true,
     toast_secs = 2,
     status_bar = true,
+    session_summary = true,
 }
 
 -- { cấp tối thiểu, biểu tượng }
@@ -199,6 +200,231 @@ function Core.countAch(st)
     return n
 end
 
+local function newPeriodBucket()
+    return {
+        pages = 0,
+        seconds = 0,
+        exp = 0,
+        hours = {},
+        books = {},
+    }
+end
+
+local function normalizeBucket(b)
+    if type(b) ~= "table" then b = {} end
+    b.pages = tonumber(b.pages) or 0
+    b.seconds = tonumber(b.seconds) or 0
+    b.exp = tonumber(b.exp) or 0
+    if type(b.hours) ~= "table" then b.hours = {} end
+    for h = 0, 23 do b.hours[h] = tonumber(b.hours[h]) or 0 end
+    if type(b.books) ~= "table" then b.books = {} end
+    for k, v in pairs(b.books) do
+        if type(v) == "table" then
+            b.books[k] = {
+                title = tostring(v.title or k),
+                pages = tonumber(v.pages) or 0,
+                seconds = tonumber(v.seconds) or 0,
+                exp = tonumber(v.exp) or 0,
+                hours = type(v.hours) == "table" and v.hours or {},
+            }
+            for h = 0, 23 do
+                b.books[k].hours[h] = tonumber(b.books[k].hours[h]) or 0
+            end
+        else
+            b.books[k] = {
+                title = tostring(k),
+                pages = tonumber(v) or 0,
+                seconds = 0,
+                exp = 0,
+                hours = {},
+            }
+        end
+    end
+    return b
+end
+
+function Core.recordHistory(st, opts)
+    opts = opts or {}
+    local ym = os.date("%Y-%m")
+    local yr = os.date("%Y")
+    local hr = tonumber(os.date("%H")) or 12
+    st.months = st.months or {}
+    st.years = st.years or {}
+    st.months[ym] = normalizeBucket(st.months[ym])
+    st.years[yr] = normalizeBucket(st.years[yr])
+
+    local pages = tonumber(opts.pages) or 0
+    local secs = tonumber(opts.seconds) or 0
+    local exp = tonumber(opts.exp) or 0
+    local bkey = opts.book_key
+    local btitle = opts.book_title
+
+    for _, bucket in ipairs({ st.months[ym], st.years[yr] }) do
+        bucket.pages = bucket.pages + pages
+        bucket.seconds = bucket.seconds + secs
+        bucket.exp = bucket.exp + exp
+        if pages > 0 or secs > 0 then
+            bucket.hours[hr] = (bucket.hours[hr] or 0) + math.max(1, pages)
+        end
+        if bkey and (pages > 0 or secs > 0 or exp > 0) then
+            local bk = bucket.books[bkey] or {
+                title = btitle or bkey, pages = 0, seconds = 0, exp = 0, hours = {},
+            }
+            bk.title = btitle or bk.title
+            bk.pages = (tonumber(bk.pages) or 0) + pages
+            bk.seconds = (tonumber(bk.seconds) or 0) + secs
+            bk.exp = (tonumber(bk.exp) or 0) + exp
+            bk.hours = bk.hours or {}
+            if pages > 0 or secs > 0 then
+                bk.hours[hr] = (tonumber(bk.hours[hr]) or 0) + math.max(1, pages)
+            end
+            bucket.books[bkey] = bk
+        end
+    end
+end
+
+function Core.formatSlotRange(hr)
+    hr = tonumber(hr)
+    if not hr then return "--" end
+    local h1 = hr % 24
+    local h2 = (hr + 1) % 24
+    return string.format("%02d:00–%02d:00", h1, h2)
+end
+
+function Core.computeRecap(st, mode, key)
+    mode = (mode == "year") and "year" or "month"
+    local now_ym = os.date("%Y-%m")
+    local now_yr = os.date("%Y")
+    local target_key = key or (mode == "year" and now_yr or now_ym)
+
+    local bucket
+    if mode == "year" then
+        bucket = st.years and st.years[target_key]
+    else
+        bucket = st.months and st.months[target_key]
+    end
+
+    local top_book, top_pages = nil, 0
+    local best_hour, best_hour_score = nil, 0
+    local total_pages, total_seconds, total_exp = 0, 0, 0
+    local books = {}
+
+    if type(bucket) == "table" then
+        total_pages = tonumber(bucket.pages) or 0
+        total_seconds = tonumber(bucket.seconds) or 0
+        total_exp = tonumber(bucket.exp) or 0
+        if type(bucket.books) == "table" then
+            for key_id, bk in pairs(bucket.books) do
+                local p = tonumber(bk.pages) or 0
+                local secs = tonumber(bk.seconds) or 0
+                local exp = tonumber(bk.exp) or 0
+                local title = tostring(bk.title or key_id)
+                local book_hours = bk.hours or {}
+                local book_best_hour, book_best_score = nil, 0
+                for h = 0, 23 do
+                    local score = tonumber(book_hours[h]) or 0
+                    if score > book_best_score then
+                        book_best_hour, book_best_score = h, score
+                    end
+                end
+                local boss = st.bosses and st.bosses[key_id] or nil
+                books[#books + 1] = {
+                    key = key_id,
+                    title = title,
+                    pages = p,
+                    seconds = secs,
+                    exp = exp,
+                    best_hour = book_best_hour,
+                    best_slot = book_best_hour ~= nil and Core.formatSlotRange(book_best_hour) or nil,
+                    defeated = boss and boss.defeated and true or false,
+                    defeated_date = boss and boss.date or nil,
+                    lifetime_pages = boss and (tonumber(boss.pages) or 0) or p,
+                }
+                if p > top_pages then
+                    top_pages, top_book = p, title
+                end
+            end
+        end
+        if type(bucket.hours) == "table" then
+            for h = 0, 23 do
+                local score = tonumber(bucket.hours[h]) or 0
+                if score > best_hour_score then
+                    best_hour_score, best_hour = score, h
+                end
+            end
+        end
+    end
+
+    -- Older saves may predate the per-book period history. Do not invent time
+    -- data, but keep their tracked titles visible in the current-period recap.
+    if total_pages == 0 and total_seconds == 0
+        and target_key == (mode == "year" and now_yr or now_ym)
+        and #books == 0 and type(st.bosses) == "table" then
+        for key_id, boss in pairs(st.bosses) do
+            local p = tonumber(boss.pages) or 0
+            if p > 0 or boss.defeated then
+                books[#books + 1] = {
+                    key = key_id,
+                    title = tostring(boss.title or key_id),
+                    pages = p,
+                    seconds = 0,
+                    exp = 0,
+                    best_hour = nil,
+                    best_slot = nil,
+                    defeated = boss.defeated and true or false,
+                    defeated_date = boss.date,
+                    lifetime_pages = p,
+                }
+                if p > top_pages then top_pages, top_book = p, tostring(boss.title or key_id) end
+            end
+        end
+        if #books > 0 then
+            total_pages = tonumber(st.pages) or 0
+            total_seconds = tonumber(st.seconds) or 0
+            total_exp = tonumber(st.exp) or 0
+        end
+    end
+
+    table.sort(books, function(a, b)
+        if a.pages ~= b.pages then return a.pages > b.pages end
+        if a.seconds ~= b.seconds then return a.seconds > b.seconds end
+        return tostring(a.title):lower() < tostring(b.title):lower()
+    end)
+
+    local prefix = mode == "year" and tostring(target_key) or tostring(target_key)
+    local achievement_count, defeated_count = 0, 0
+    for _, date in pairs(st.ach or {}) do
+        if type(date) == "string" and date:sub(1, #prefix) == prefix then
+            achievement_count = achievement_count + 1
+        end
+    end
+    for _, boss in pairs(st.bosses or {}) do
+        local date = boss and boss.date
+        if boss and boss.defeated and type(date) == "string" and date:sub(1, #prefix) == prefix then
+            defeated_count = defeated_count + 1
+        end
+    end
+
+    local best_streak = tonumber(st.best_streak) or tonumber(st.streak) or 0
+    return {
+        mode = mode,
+        period = target_key,
+        top_book = top_book,
+        top_book_pages = top_pages,
+        books = books,
+        book_count = #books,
+        achievement_count = achievement_count,
+        defeated_count = defeated_count,
+        total_seconds = total_seconds,
+        total_hours = total_seconds / 3600,
+        total_pages = total_pages,
+        total_exp = total_exp,
+        best_hour = best_hour,
+        best_slot = best_hour ~= nil and Core.formatSlotRange(best_hour) or nil,
+        best_streak = best_streak,
+    }
+end
+
 function Core.normalize(st)
     if type(st) ~= "table" then st = {} end
     local numbers = { "exp", "pages", "seconds", "streak", "best_streak",
@@ -213,6 +439,10 @@ function Core.normalize(st)
     if type(st.bosses) ~= "table" then st.bosses = {} end
     if type(st.loot) ~= "table" then st.loot = {} end
     if type(st.ach) ~= "table" then st.ach = {} end
+    if type(st.months) ~= "table" then st.months = {} end
+    for k, v in pairs(st.months) do st.months[k] = normalizeBucket(v) end
+    if type(st.years) ~= "table" then st.years = {} end
+    for k, v in pairs(st.years) do st.years[k] = normalizeBucket(v) end
     if type(st.cfg) ~= "table" then st.cfg = {} end
     for k, v in pairs(Core.DEFAULT_CFG) do
         if st.cfg[k] == nil then st.cfg[k] = v end
