@@ -73,7 +73,7 @@ end
 -- ---------------------------------------------------------------------
 -- Canvas
 -- ---------------------------------------------------------------------
-local Canvas = InputContainer:extend{ modal = true }
+local Canvas = InputContainer:extend{ modal = false }
 
 function Canvas:freeScene()
     for _, it in ipairs(self.items or {}) do
@@ -197,7 +197,52 @@ function Canvas:paintTo(bb)
     end
 end
 
+local function triggerKOReaderScreenshot(prefix, lang)
+    -- Prefer the Screenshoter instance already registered on ReaderUI. It has
+    -- the real reader context (document, file chooser, settings) and is the
+    -- same handler KOReader uses for its built-in screenshot gesture.
+    local clean_prefix = tostring(prefix or "ReadQuest"):gsub("[^%w_%-]", "_")
+    local ok, result = pcall(function()
+        local ReaderUI = require("apps/reader/readerui")
+        local reader = ReaderUI.instance
+        local helper = reader and reader.screenshot
+
+        -- ReadQuest may also be opened without an active reader. Keep a safe
+        -- fallback for that case, but still delegate capture to KOReader.
+        if not helper then
+            local Screenshoter = require("ui/widget/screenshoter")
+            helper = Screenshoter:new{ ui = {}, prefix = clean_prefix }
+        end
+
+        local previous_prefix = helper.prefix
+        helper.prefix = clean_prefix
+        local call_ok, shot_result = pcall(helper.onScreenshot, helper)
+        helper.prefix = previous_prefix
+        if not call_ok then error(shot_result) end
+        return shot_result
+    end)
+
+    if not ok then
+        local message = I18N.resolveLang(lang) == "vi"
+            and "Không thể chụp màn hình: "
+            or "Screenshot failed: "
+        UIManager:show(InfoMessage:new{
+            text = message .. tostring(result),
+            timeout = 4,
+        })
+        return false
+    end
+
+    -- KOReader's Screenshoter displays its own detailed error message on a
+    -- normal capture failure, so do not stack a duplicate notification.
+    return result == true
+end
+
 function Canvas:onTapScreen(arg, ges)
+    if ges and ges.ges == "two_finger_tap" then
+        triggerKOReaderScreenshot()
+        return true
+    end
     local p = ges and ges.pos
     if p then
         for i = #self.hits, 1, -1 do
@@ -224,7 +269,14 @@ end
 -- ---------------------------------------------------------------------
 -- Hub
 -- ---------------------------------------------------------------------
-local Hub = Canvas:extend{ screen = "home", page = 1, inv_tab = 1 }
+local Hub = Canvas:extend{
+    screen = "home",
+    page = 1,
+    inv_tab = 1,
+    recap_tab = 1,
+    modal = false,
+    covers_fullscreen = false,
+}
 
 function Hub:t(key, ...)
     return self.plugin:t(key, ...)
@@ -242,6 +294,10 @@ function Hub:init()
     self.ges_events = {
         TapScreen = { GestureRange:new{ ges = "tap", range = full } },
         SwipeScreen = { GestureRange:new{ ges = "swipe", range = full } },
+        TwoFingerSwipe = { GestureRange:new{ ges = "two_finger_swipe", range = full } },
+        TwoFingerPan = { GestureRange:new{ ges = "two_finger_pan", range = full } },
+        TwoFingerTap = { GestureRange:new{ ges = "two_finger_tap", range = full } },
+        MultiSwipe = { GestureRange:new{ ges = "multiswipe", range = full } },
     }
     if Device:hasKeys() then
         self.key_events = { Back = { { Device.input.group.Back } } }
@@ -303,6 +359,31 @@ function Hub:prevPage()
         self.page = self.page - 1
         self:refresh("partial")
     end
+end
+
+function Hub:onScreenshot()
+    triggerKOReaderScreenshot("ReadQuest", self:lang())
+    return true
+end
+
+function Hub:onTwoFingerSwipe(arg, ges)
+    triggerKOReaderScreenshot("ReadQuest", self:lang())
+    return true
+end
+
+function Hub:onTwoFingerPan(arg, ges)
+    triggerKOReaderScreenshot("ReadQuest", self:lang())
+    return true
+end
+
+function Hub:onTwoFingerTap(arg, ges)
+    triggerKOReaderScreenshot("ReadQuest", self:lang())
+    return true
+end
+
+function Hub:onMultiSwipe(arg, ges)
+    triggerKOReaderScreenshot("ReadQuest", self:lang())
+    return true
 end
 
 function Hub:onSwipeScreen(arg, ges)
@@ -435,6 +516,15 @@ function Hub:build_home()
         self:text(cx + dp(50), y + dp(36), s[3], 13, { c = "d", maxw = colw - dp(58) })
     end
     y = y + s_h + gap
+
+    -- thẻ tổng kết tháng & năm
+    local rc_h = dp(44)
+    self:frame(M, y, cw, rc_h, dp(14), 2)
+    self:icon(M + dp(12), y + (rc_h - dp(26)) / 2, dp(26), "trophy")
+    self:text(M + dp(46), y, self:t("recap_title"), 16, { bold = true, boxh = rc_h, maxw = cw * 0.52 })
+    self:text(M + dp(12), y, self:t("tile_recap_sub"), 13, { align = "right", boxw = cw - dp(24), boxh = rc_h, c = "d", maxw = cw * 0.42 })
+    self:hit(M, y, cw, rc_h, function() self:go("recap") end)
+    y = y + rc_h + gap
 
     -- lưới 6 ô
     local has_doc = P.ui.document ~= nil
@@ -634,7 +724,7 @@ function Hub:build_inv()
     elseif self.inv_tab == 2 then
         for _, b in ipairs(won) do
             rows[#rows + 1] = {
-                icon = "monster\" .. Core.bossVariant(b.title), mono = \"m",
+                icon = "monster" .. Core.bossVariant(b.title),
                 title = Core.bossName(b.title, lang),
                 sub = self:t("won_sub", Core.shortDate(b.date), b.pages or 0),
             }
@@ -709,6 +799,131 @@ function Hub:build_ranks()
     end
 end
 
+-- --- thẻ tổng kết tháng & năm ---------------------------------------------
+function Hub:build_recap()
+    local P, W, M = self.plugin, self.W, self.M
+    local st = P.state
+    local lang = self:lang()
+    self:header(self:t("recap_title"), true)
+    local cw = W - 2 * M
+    local y = self.hh + M
+
+    local mode = (self.recap_tab == 2) and "year" or "month"
+    local tab_h, tg = dp(44), dp(8)
+    local tw = (cw - tg) / 2
+    self:button(M, y, tw, tab_h, self:t("recap_tab_month"), function()
+        self.recap_tab = 1
+        self.page = 1
+        self:refresh("partial")
+    end, { style = (mode == "month") and "solid" or "outline", size = 16, bold = true })
+    self:button(M + tw + tg, y, tw, tab_h, self:t("recap_tab_year"), function()
+        self.recap_tab = 2
+        self.page = 1
+        self:refresh("partial")
+    end, { style = (mode == "year") and "solid" or "outline", size = 16, bold = true })
+    y = y + tab_h + dp(10)
+
+    local rec = Core.computeRecap(st, mode)
+    local lv = Core.levelInfo(st.exp)
+    local rank_name = Core.titleOf(lv, lang)
+    local rank_icon = Core.titleIcon(lv)
+
+    -- Compact newspaper-style recap header: period, rank and four key metrics.
+    local summary_h = dp(112)
+    self:frame(M, y, cw, summary_h, dp(14), 2)
+    self:icon(M + dp(12), y + dp(9), dp(30), rank_icon)
+    local heading_key = (mode == "year") and "recap_card_year" or "recap_card_month"
+    self:text(M + dp(50), y + dp(7), self:t(heading_key, rec.period), 16,
+        { bold = true, maxw = cw - dp(190) })
+    self:text(M + cw - dp(132), y + dp(10), self:t("level_fmt", lv) .. " • " .. rank_name, 12,
+        { align = "right", boxw = dp(118), c = "d", maxw = dp(118) })
+
+    local metrics_y = y + dp(45)
+    local col_w = (cw - dp(30)) / 2
+    local metric_rows = {
+        { icon = "book", label = self:t("stat_pages"), value = Core.fmtNum(rec.total_pages) },
+        { icon = "clock", label = self:t("recap_total_hours"), value = Core.fmtTimeShort(rec.total_seconds, lang) },
+        { icon = "ach_dawn", label = self:t("recap_best_slot"), value = rec.best_slot or self:t("recap_none") },
+        { icon = "chest", label = self:t("recap_trophies"), value = self:t("recap_trophies_val", rec.defeated_count, rec.achievement_count) },
+    }
+    for i, metric in ipairs(metric_rows) do
+        local col = (i - 1) % 2
+        local row = math.floor((i - 1) / 2)
+        local mx = M + dp(12) + col * col_w
+        local my = metrics_y + row * dp(30)
+        self:icon(mx, my + dp(1), dp(18), metric.icon)
+        self:text(mx + dp(24), my, metric.label .. ": " .. metric.value, 13,
+            { maxw = col_w - dp(28), bold = true })
+    end
+    self:text(M + dp(12), y + summary_h - dp(17), self:t("recap_exp_total", Core.fmtNum(rec.total_exp)), 11,
+        { c = "d", maxw = cw - dp(24) })
+    y = y + summary_h + dp(10)
+
+    local footer_h = dp(46)
+    local footer_y = self.H - M - footer_h
+    local list_title_y = y
+    local list_area_y = list_title_y + dp(24)
+    local list_bottom = footer_y - dp(6)
+    local available_h = math.max(dp(72), list_bottom - list_area_y)
+    local gap = dp(7)
+    local min_row_h = dp(90)
+    local per = math.max(1, math.floor((available_h + gap) / (min_row_h + gap)))
+    if #rec.books > 0 then per = math.min(per, #rec.books) else per = 1 end
+    self.npages = math.max(1, math.ceil(#rec.books / per))
+    self.page = clamp(self.page, 1, self.npages)
+    local row_h = math.max(dp(90), math.floor((available_h - (per - 1) * gap) / per))
+    self:text(M + dp(2), list_title_y, self:t("recap_books_title", rec.book_count, self.page, self.npages), 15,
+        { bold = true, maxw = cw - dp(4) })
+
+    if #rec.books == 0 then
+        self:icon((W - dp(58)) / 2, list_area_y + dp(30), dp(58), "book", "m")
+        self:para(M + dp(18), list_area_y + dp(100), cw - dp(36), self:t("recap_empty_books"), 15,
+            { align = "center", c = "d" })
+    else
+        local first = (self.page - 1) * per + 1
+        local last = math.min(#rec.books, first + per - 1)
+        for idx = first, last do
+            local book = rec.books[idx]
+            local row_index = idx - first
+            local ry = list_area_y + row_index * (row_h + gap)
+            self:frame(M, ry, cw, row_h, dp(12), 1)
+            local isz = math.min(dp(38), row_h - dp(14))
+            self:icon(M + dp(10), ry + dp(8), isz, "monster" .. Core.bossVariant(book.title))
+            local tx = M + dp(10) + isz + dp(12)
+            local text_w = cw - isz - dp(42)
+            local status = book.defeated and self:t("recap_book_won") or self:t("recap_book_active")
+            self:text(tx, ry + dp(7), Core.shorten(book.title, 40), 16,
+                { bold = true, maxw = text_w })
+            local stats = self:t("recap_book_stats", Core.fmtNum(book.pages),
+                Core.fmtTimeShort(book.seconds, lang), Core.fmtNum(book.exp))
+            self:text(tx, ry + dp(31), stats, 12, { maxw = text_w, c = "d" })
+            local slot = book.best_slot or self:t("recap_none")
+            local status_text = status
+            if book.defeated and book.defeated_date then
+                status_text = status .. " • " .. Core.shortDate(book.defeated_date)
+            end
+            self:text(tx, ry + dp(51), self:t("recap_book_slot", slot), 12,
+                { maxw = text_w, c = "d" })
+            self:text(tx, ry + dp(69), status_text, 12,
+                { maxw = text_w, bold = true })
+        end
+    end
+
+    -- Use a single footer row for paging and capture so the content area stays clear.
+    local button_gap = dp(6)
+    local small_w = dp(66)
+    local shot_w = cw - 2 * small_w - 2 * button_gap
+    self:button(M, footer_y, small_w, footer_h, "‹", function()
+        self:prevPage()
+    end, { style = self.page > 1 and "outline" or "disabled", size = 22, bold = true })
+    self:button(M + small_w + button_gap, footer_y, shot_w, footer_h, self:t("recap_snap_short"), function()
+        triggerKOReaderScreenshot("ReadQuest_Recap", lang)
+    end, { style = "solid", bold = true, size = 14 })
+    self:button(M + small_w + button_gap + shot_w + button_gap, footer_y,
+        small_w, footer_h, "›", function() self:nextPage() end,
+        { style = self.page < self.npages and "outline" or "disabled", size = 22, bold = true })
+end
+
 -- --- cài đặt --------------------------------------------------------------
 function Hub:build_settings()
     local P, W, M = self.plugin, self.W, self.M
@@ -717,7 +932,7 @@ function Hub:build_settings()
     self:header(self:t("tile_settings"), true)
     local cw = W - 2 * M
     local y = self.hh + M
-    local rh, g = dp(58), dp(7)
+    local rh, g = dp(52), dp(6)
 
     local function touch()
         P.dirty = true
@@ -744,6 +959,7 @@ function Hub:build_settings()
         { kind = "lang", label = self:t("set_lang"), sub = self:t("set_lang_sub") },
         { kind = "toggle", label = self:t("set_statusbar"), sub = self:t("set_statusbar_sub"), key = "status_bar" },
         { kind = "toggle", label = self:t("set_toast"), sub = self:t("set_toast_sub"), key = "toast" },
+        { kind = "toggle", label = self:t("set_session_summary"), sub = self:t("set_session_summary_sub"), key = "session_summary" },
         { kind = "step", label = self:t("set_toast_secs"), sub = self:t("set_toast_secs_sub"), key = "toast_secs", vmin = 1, vmax = 5, step = 1, unit = self:t("unit_sec") },
         { kind = "step", label = self:t("set_min_secs"), sub = self:t("set_min_secs_sub"), key = "min_secs", vmin = 3, vmax = 60, step = 1, unit = self:t("unit_sec") },
         { kind = "step", label = self:t("set_goal"), sub = self:t("set_goal_sub"), key = "goal", vmin = 5, vmax = 300, step = 5, unit = self:t("unit_page") },
@@ -754,8 +970,8 @@ function Hub:build_settings()
         self:frame(M, ry, cw, rh, dp(14), 2)
         local ctrl_w = (r.kind == "toggle") and dp(76) or dp(176)
         local lw = cw - dp(14) - ctrl_w - dp(20)
-        self:text(M + dp(14), ry + dp(8), r.label, 17, { bold = true, maxw = lw })
-        self:text(M + dp(14), ry + dp(34), r.sub, 12, { c = "d", maxw = lw })
+        self:text(M + dp(14), ry + dp(6), r.label, 16, { bold = true, maxw = lw })
+        self:text(M + dp(14), ry + dp(30), r.sub, 12, { c = "d", maxw = lw })
         local cx = M + cw - dp(14) - ctrl_w
         if r.kind == "lang" then
             local bh = dp(38)
@@ -793,19 +1009,29 @@ function Hub:build_settings()
 
     local by = y + #rows * (rh + g) + dp(4)
     local bh = dp(48)
+    local button_gap = dp(8)
+    local half_w = (cw - button_gap) / 2
+    self:button(M, by, half_w, bh, self:t("set_update_btn"), function()
+        local ok, updater = pcall(require, "readquest_updater")
+        if not ok then
+            UIManager:show(InfoMessage:new{ text = self:t("update_failed", tostring(updater)), timeout = 4 })
+            return
+        end
+        updater.check(P)
+    end, { size = 14, bold = true })
     if self.confirm_reset then
-        self:button(M, by, cw, bh, self:t("reset_confirm"), function()
+        self:button(M + half_w + button_gap, by, half_w, bh, self:t("reset_confirm"), function()
             P:resetAll()
             self.confirm_reset = false
             self:go("home")
-        end, { style = "solid", bold = true, size = 16 })
+        end, { style = "solid", bold = true, size = 14 })
         self:text(M, by + bh + dp(4), self:t("reset_hint"), 12,
             { c = "d", align = "center", boxw = cw })
     else
-        self:button(M, by, cw, bh, self:t("reset_btn"), function()
+        self:button(M + half_w + button_gap, by, half_w, bh, self:t("reset_btn"), function()
             self.confirm_reset = true
             self:refresh("ui")
-        end, { size = 16 })
+        end, { size = 14 })
     end
     self:text(M, self.H - M - dp(20), self:t("version_fmt", Core.VERSION), 12,
         { c = "d", align = "center", boxw = cw })
@@ -879,7 +1105,10 @@ end
 -- ---------------------------------------------------------------------
 -- Popup chúc mừng
 -- ---------------------------------------------------------------------
-local Popup = Canvas:extend{}
+local Popup = Canvas:extend{
+    modal = false,
+    covers_fullscreen = false,
+}
 
 function Popup:init()
     local sw, sh = Screen:getWidth(), Screen:getHeight()
@@ -904,8 +1133,11 @@ function Popup:init()
         + dp(12) + btn_h + dp(10) + hint_h + pad
     local cx, cy = floor((sw - cw) / 2), floor((sh - ch) / 2)
     self.dimen = Geom:new{ x = cx, y = cy, w = cw, h = ch }
+    local full_pop = Geom:new{ x = 0, y = 0, w = sw, h = sh }
     self.ges_events = {
-        TapScreen = { GestureRange:new{ ges = "tap", range = Geom:new{ x = 0, y = 0, w = sw, h = sh } } },
+        TapScreen = { GestureRange:new{ ges = "tap", range = full_pop } },
+        TwoFingerSwipe = { GestureRange:new{ ges = "two_finger_swipe", range = full_pop } },
+        MultiSwipe = { GestureRange:new{ ges = "multiswipe", range = full_pop } },
     }
 
     self:frame(cx, cy, cw, ch, dp(20), 4)
@@ -939,11 +1171,23 @@ function Popup:init()
         { c = "d", align = "center", boxw = cw })
 end
 
+function Popup:onScreenshot()
+    triggerKOReaderScreenshot("ReadQuest_Popup", self.lang)
+    return true
+end
+
 function Popup:takeScreenshot()
-    pcall(function()
-        local Event = require("ui/event")
-        UIManager:sendEvent(Event:new("Screenshot"))
-    end)
+    triggerKOReaderScreenshot("ReadQuest_Popup", self.lang)
+end
+
+function Popup:onTwoFingerSwipe()
+    self:takeScreenshot()
+    return true
+end
+
+function Popup:onMultiSwipe()
+    self:takeScreenshot()
+    return true
 end
 
 function Popup:dismiss()
@@ -1011,5 +1255,7 @@ function Toast:onCloseWidget()
     if self.main_tw and self.main_tw.free then pcall(self.main_tw.free, self.main_tw) end
     if self.detail_tw and self.detail_tw.free then pcall(self.detail_tw.free, self.detail_tw) end
 end
+
+
 
 return { Hub = Hub, Popup = Popup, Toast = Toast, Canvas = Canvas }
