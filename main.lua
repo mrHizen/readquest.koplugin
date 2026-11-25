@@ -1,626 +1,457 @@
 --[[--
-ReadQuest 2.4 — KOReader RPG Reading Plugin
+Dữ liệu & hàm tiện ích cho ReadQuest (hỗ trợ đa ngôn ngữ & bản địa hóa văn hóa).
 ]]
 
-local DataStorage = require("datastorage")
-local Device = require("device")
-local Dispatcher = require("dispatcher")
-local InfoMessage = require("ui/widget/infomessage")
-local LuaSettings = require("luasettings")
-local UIManager = require("ui/uimanager")
-local WidgetContainer = require("ui/widget/container/widgetcontainer")
-
-local Core = require("readquest_core")
 local I18N = require("readquest_i18n")
-local Icons = require("readquest_icons")
-local UI = require("readquest_ui")
 
-local SETTINGS_FILE = DataStorage:getSettingsDir() .. "/readquest.lua"
+local Core = {}
 
--- Đưa plugin ra trực tiếp menu "Công cụ" (tools) thay vì "Công cụ khác" (more_tools)
-local function registerInToolsMenu()
-    for _, modname in ipairs({ "ui/elements/reader_menu_order", "ui/elements/filemanager_menu_order" }) do
-        local ok, order = pcall(require, modname)
-        if ok and type(order) == "table" and type(order.tools) == "table" then
-            local exists = false
-            for _, k in ipairs(order.tools) do
-                if k == "readquest" then exists = true break end
-            end
-            if not exists then
-                table.insert(order.tools, "readquest")
+Core.VERSION = "2.5.2"
+Core.BASE_EXP = 10
+Core.ACH_EXP = 150
+Core.BOSS_END_RATIO = 0.97
+Core.MILESTONES = { 0.25, 0.5, 0.75, 0.9 }
+
+Core.DEFAULT_CFG = {
+    lang = "auto",      -- auto | vi | en | fr | ja | zh | ko
+    min_secs = 10,
+    max_secs = 600,
+    goal = 20,
+    toast = true,
+    toast_detail = true,
+    toast_secs = 2,
+    status_bar = true,
+    session_summary = true,
+}
+
+-- { cấp tối thiểu, biểu tượng }
+Core.TITLES = {
+    { 1, "rank1" }, { 5, "rank2" }, { 10, "rank3" }, { 15, "rank4" },
+    { 25, "rank5" }, { 35, "rank6" }, { 45, "rank7" }, { 55, "rank8" },
+}
+
+Core.RARITY_ICON = { common = "rar_common", rare = "rar_rare", epic = "rar_epic", legend = "rar_legend" }
+
+function Core.today_str() return os.date("%Y-%m-%d") end
+function Core.yesterday_str() return os.date("%Y-%m-%d", os.time() - 86400) end
+
+function Core.fmtNum(n)
+    local s = tostring(math.floor(n or 0))
+    local out = s:reverse():gsub("(%d%d%d)", "%1."):reverse()
+    return (out:gsub("^%.", ""))
+end
+
+function Core.fmtTime(secs, lang)
+    secs = math.floor(secs or 0)
+    local h = math.floor(secs / 3600)
+    local m = math.floor((secs % 3600) / 60)
+    if h > 0 then return I18N.t(lang, "time_hm", h, m) end
+    return I18N.t(lang, "time_m", m)
+end
+
+function Core.fmtTimeShort(secs, lang)
+    secs = math.floor(secs or 0)
+    local h = math.floor(secs / 3600)
+    local m = math.floor((secs % 3600) / 60)
+    if h > 0 then return I18N.t(lang, "time_hm_short", h, m) end
+    return I18N.t(lang, "time_m_short", m)
+end
+
+function Core.shortDate(d)
+    local y, m, dd = tostring(d or ""):match("(%d+)-(%d+)-(%d+)")
+    if not y then return tostring(d or "") end
+    return string.format("%s/%s/%s", dd, m, y:sub(3))
+end
+
+function Core.shorten(s, max)
+    s = tostring(s or "")
+    local chars = {}
+    for ch in s:gmatch("[\1-\127\194-\244][\128-\191]*") do chars[#chars + 1] = ch end
+    if #chars <= max then return s end
+    return table.concat(chars, "", 1, max - 1) .. "…"
+end
+
+function Core.hashStr(s)
+    local h = 0
+    for i = 1, #s do h = (h * 31 + s:byte(i)) % 1000003 end
+    return h
+end
+
+function Core.bossName(title, lang)
+    title = tostring(title or "?")
+    local prefixes = I18N.bossPrefixList(lang)
+    local prefix = prefixes[Core.hashStr(title) % #prefixes + 1]
+    return prefix .. " «" .. Core.shorten(title, 34) .. "»"
+end
+
+function Core.bossVariant(title)
+    return Core.hashStr(tostring(title or "?")) % 3 + 1
+end
+
+function Core.bossMinPages(total)
+    return math.min(15, math.max(3, math.ceil(total * 0.05)))
+end
+
+function Core.expNeed(lv) return 300 + 50 * lv + 5 * lv * lv end
+
+function Core.levelInfo(exp)
+    local lv, rem = 1, exp
+    while rem >= Core.expNeed(lv) do
+        rem = rem - Core.expNeed(lv)
+        lv = lv + 1
+    end
+    return lv, rem, Core.expNeed(lv)
+end
+
+function Core.titleIndex(lv)
+    local idx = 1
+    for i, t in ipairs(Core.TITLES) do
+        if lv >= t[1] then idx = i end
+    end
+    return idx
+end
+
+function Core.titleOf(lv, lang)
+    return I18N.titleName(lang, Core.titleIndex(lv))
+end
+
+function Core.titleIcon(lv)
+    return Core.TITLES[Core.titleIndex(lv)][2]
+end
+
+function Core.rollLoot(ratio, lang)
+    ratio = math.max(0, math.min(1, ratio or 0))
+    local r = math.random()
+    local legend = 0.01 + 0.04 * ratio
+    local epic = legend + 0.09 + 0.10 * ratio
+    local rare = epic + 0.30 + 0.10 * ratio
+    local rarity = "common"
+    if r < legend then rarity = "legend"
+    elseif r < epic then rarity = "epic"
+    elseif r < rare then rarity = "rare" end
+    local pool = I18N.lootPool(lang, rarity)
+    local idx = math.random(#pool)
+    return { name = pool[idx], idx = idx, rarity = rarity }
+end
+
+function Core.lootDisplayName(item, lang)
+    if item and item.idx and item.rarity then
+        local pool = I18N.lootPool(lang, item.rarity)
+        if pool[item.idx] then return pool[item.idx] end
+    end
+    return item and item.name or "?"
+end
+
+function Core.countRarity(st, rarity)
+    local n = 0
+    for _, it in ipairs(st.loot) do
+        if it.rarity == rarity then n = n + 1 end
+    end
+    return n
+end
+
+Core.ACHIEVEMENTS = {
+    { id = "first",    icon = "ach_first",    test = function(s) return s.pages >= 1 end },
+    { id = "p100",     icon = "ach_p100",     test = function(s) return s.pages >= 100 end },
+    { id = "p1000",    icon = "ach_p1000",    test = function(s) return s.pages >= 1000 end },
+    { id = "p5000",    icon = "ach_p5000",    test = function(s) return s.pages >= 5000 end },
+    { id = "boss1",    icon = "ach_boss1",    test = function(s) return s.defeated >= 1 end },
+    { id = "boss5",    icon = "ach_boss5",    test = function(s) return s.defeated >= 5 end },
+    { id = "boss20",   icon = "ach_boss20",   test = function(s) return s.defeated >= 20 end },
+    { id = "streak3",  icon = "ach_streak3",  test = function(s) return s.best_streak >= 3 end },
+    { id = "streak7",  icon = "ach_streak7",  test = function(s) return s.best_streak >= 7 end },
+    { id = "streak30", icon = "ach_streak30", test = function(s) return s.best_streak >= 30 end },
+    { id = "lv10",     icon = "rank3",        test = function(s) return (Core.levelInfo(s.exp)) >= 10 end },
+    { id = "lv25",     icon = "rank5",        test = function(s) return (Core.levelInfo(s.exp)) >= 25 end },
+    { id = "night",    icon = "ach_night",    test = function(s) return s.night_pages >= 30 end },
+    { id = "dawn",     icon = "ach_dawn",     test = function(s) return s.dawn_pages >= 30 end },
+    { id = "legend",   icon = "ach_legend",   test = function(s) return Core.countRarity(s, "legend") >= 1 end },
+}
+
+-- Lấy thông tin thành tựu mới nhất đã đạt được (icon, id, date)
+function Core.latestAchievement(st)
+    if not (st and type(st.ach) == "table") then return nil end
+    -- Ưu tiên thành tựu vừa mở gần nhất theo thứ tự thời gian / danh sách
+    if st.last_ach_id then
+        for _, a in ipairs(Core.ACHIEVEMENTS) do
+            if a.id == st.last_ach_id and st.ach[a.id] then
+                return a
             end
         end
     end
-end
-
-local ReadQuest = WidgetContainer:extend{
-    name = "readquest",
-    is_doc_only = false,
-}
-
-function ReadQuest:lang()
-    return I18N.resolveLang(self.state and self.state.cfg and self.state.cfg.lang)
-end
-
-function ReadQuest:t(key, ...)
-    return I18N.t(self:lang(), key, ...)
-end
-
-function ReadQuest:init()
-    math.randomseed(os.time())
-    self.pending = {}
-    self.popq = {}
-    self.dirty = false
-    self.last_page, self.last_time = nil, nil
-    self:load()
-    self:onDispatcherRegisterActions()
-    registerInToolsMenu()
-    if self.ui and self.ui.menu then
-        self.ui.menu:registerToMainMenu(self)
+    local best_a, best_date = nil, ""
+    for _, a in ipairs(Core.ACHIEVEMENTS) do
+        local d = st.ach[a.id]
+        if d then
+            if type(d) == "string" and d >= best_date then
+                best_date = d
+                best_a = a
+            elseif not best_a then
+                best_a = a
+            end
+        end
     end
-    self:hookStatusBar()
+    return best_a
 end
 
-function ReadQuest:onDispatcherRegisterActions()
-    Dispatcher:registerAction("readquest_profile", {
-        category = "none\", event = \"ReadQuestProfile",
-        title = self:t("action_profile"), general = true,
-    })
-    Dispatcher:registerAction("readquest_boss", {
-        category = "none\", event = \"ReadQuestBoss",
-        title = self:t("action_boss"), reader = true,
-    })
+function Core.countAch(st)
+    local n = 0
+    for _ in pairs(st.ach) do n = n + 1 end
+    return n
 end
 
-function ReadQuest:onReadQuestProfile()
-    self:openHub("home")
-    return true
-end
-
-function ReadQuest:onReadQuestBoss()
-    self:openHub("boss")
-    return true
-end
-
-function ReadQuest:addToMainMenu(menu_items)
-    registerInToolsMenu()
-    menu_items.readquest = {
-        text_func = function()
-            return self:t("app_title")
-        end,
-        sorting_hint = "tools",
-        callback = function()
-            self:openHub("home")
-        end,
+local function newPeriodBucket()
+    return {
+        pages = 0,
+        seconds = 0,
+        exp = 0,
+        hours = {},
+        books = {},
     }
 end
 
--- --- lưu / nạp ---------------------------------------------------------
-function ReadQuest:load()
-    self.settings = LuaSettings:open(SETTINGS_FILE)
-    self.state = Core.normalize(self.settings:readSetting("state"))
-end
-
-function ReadQuest:save()
-    if not (self.settings and self.state) then return end
-    if not self.dirty then return end
-    self.settings:saveSetting("state", self.state)
-    self.settings:flush()
-    self.dirty = false
-end
-
-function ReadQuest:resetAll()
-    local cfg = self.state.cfg
-    self.state = Core.normalize({ cfg = cfg })
-    self.dirty = true
-    self:save()
-    self:refreshStatusBar()
-end
-
-function ReadQuest:onFlushSettings() self:save() end
-
-function ReadQuest:onSuspend()
-    self:hideToast()
-    self:save()
-end
-
-function ReadQuest:onResume() self.last_time = os.time() end
-
--- --- tích hợp thanh trạng thái (ReaderFooter) & SimpleUI / ZenOS --------
-function ReadQuest:getStatusText()
-    if not (self.state and self.state.cfg and self.state.cfg.status_bar) then
-        return nil
-    end
-    local lv, rem, need = Core.levelInfo(self.state.exp)
-    local pct = math.floor(rem / need * 100)
-    local title = Core.titleOf(lv, self:lang())
-    return string.format("Lv.%d %s (%s/%s • %d%%)", lv, title, Core.fmtNum(rem), Core.fmtNum(need), pct)
-end
-
-function ReadQuest:getShortStatusText()
-    if not (self.state and self.state.cfg and self.state.cfg.status_bar) then
-        return nil
-    end
-    local lv, rem, need = Core.levelInfo(self.state.exp)
-    local pct = math.floor(rem / need * 100)
-    return string.format("Lv.%d (%d%%)", lv, pct)
-end
-
-function ReadQuest:getStatusIcons()
-    if not (self.state and self.state.cfg and self.state.cfg.status_bar) then
-        return nil, nil
-    end
-    local lv = Core.levelInfo(self.state.exp)
-    local rank_icon = Core.titleIcon(lv)
-    local latest_ach = Core.latestAchievement(self.state)
-    local ach_icon = latest_ach and latest_ach.icon or nil
-    return rank_icon, ach_icon
-end
-
-function ReadQuest:getStatusText()
-    if not (self.state and self.state.cfg and self.state.cfg.status_bar) then
-        return nil
-    end
-    local lv, rem, need = Core.levelInfo(self.state.exp)
-    local pct = math.floor(rem / need * 100)
-    local title = Core.titleOf(lv, self:lang())
-    return string.format("Lv.%d %s (%s/%s • %d%%)", lv, title, Core.fmtNum(rem), Core.fmtNum(need), pct)
-end
-
-function ReadQuest:getShortStatusText()
-    if not (self.state and self.state.cfg and self.state.cfg.status_bar) then
-        return nil
-    end
-    local lv, rem, need = Core.levelInfo(self.state.exp)
-    local pct = math.floor(rem / need * 100)
-    return string.format("Lv.%d (%d%%)", lv, pct)
-end
-
-function ReadQuest:getStatusIcons()
-    if not (self.state and self.state.cfg and self.state.cfg.status_bar) then
-        return nil, nil
-    end
-    local lv = Core.levelInfo(self.state.exp)
-    local rank_icon = Core.titleIcon(lv)
-    local latest_ach = Core.latestAchievement(self.state)
-    local ach_icon = latest_ach and latest_ach.icon or nil
-    return rank_icon, ach_icon
-end
-
-function ReadQuest:hookStatusBar()
-    if self._footer_hooked then return end
-    local footer = self.ui and self.ui.view and self.ui.view.footer
-    if not footer then return end
-    self._footer_hooked = true
-
-    -- 1. Đăng ký vào additional_footer_content (nếu bản KOReader hỗ trợ)
-    if type(footer.addAdditionalFooterContent) == "function" then
-        pcall(function()
-            footer:addAdditionalFooterContent(function()
-                return self:getStatusText()
-            end)
-        end)
-    end
-
-    -- 2. Móc nối getStatusText của ReaderFooter để chỉ hiển thị text cấp độ & tiến độ
-    if type(footer.getStatusText) == "function" then
-        local orig_getStatusText = footer.getStatusText
-        footer.getStatusText = function(f_self, ...)
-            local res = orig_getStatusText(f_self, ...)
-            local rq_txt = self:getStatusText()
-            if rq_txt and rq_txt ~= "" then
-                if res and res ~= "" then
-                    return res .. "  |  " .. rq_txt
-                end
-                return rq_txt
+local function normalizeBucket(b)
+    if type(b) ~= "table" then b = {} end
+    b.pages = tonumber(b.pages) or 0
+    b.seconds = tonumber(b.seconds) or 0
+    b.exp = tonumber(b.exp) or 0
+    if type(b.hours) ~= "table" then b.hours = {} end
+    for h = 0, 23 do b.hours[h] = tonumber(b.hours[h]) or 0 end
+    if type(b.books) ~= "table" then b.books = {} end
+    for k, v in pairs(b.books) do
+        if type(v) == "table" then
+            b.books[k] = {
+                title = tostring(v.title or k),
+                pages = tonumber(v.pages) or 0,
+                seconds = tonumber(v.seconds) or 0,
+                exp = tonumber(v.exp) or 0,
+                hours = type(v.hours) == "table" and v.hours or {},
+            }
+            for h = 0, 23 do
+                b.books[k].hours[h] = tonumber(b.books[k].hours[h]) or 0
             end
-            return res
+        else
+            b.books[k] = {
+                title = tostring(k),
+                pages = tonumber(v) or 0,
+                seconds = 0,
+                exp = 0,
+                hours = {},
+            }
         end
-    end
-
-    -- 3. Xuất API toàn cục & sự kiện cho SimpleUI / ZenOS
-    _G.ReadQuestStatus = function() return self:getStatusText() end
-    _G.ReadQuestShortStatus = function() return self:getShortStatusText() end
-    _G.ReadQuestIcons = function() return self:getStatusIcons() end
-end
-function ReadQuest:refreshStatusBar()
-    local lv, rem, need = Core.levelInfo(self.state.exp)
-    local pct = math.floor(rem / need * 100)
-    local rank_icon, ach_icon = self:getStatusIcons()
-    UIManager:broadcastEvent(require("ui/event"):new("ReadQuestUpdated", {
-        level = lv,
-        title = Core.titleOf(lv, self:lang()),
-        exp = self.state.exp,
-        rem = rem,
-        need = need,
-        pct = pct,
-        rank_icon = rank_icon,
-        latest_ach_icon = ach_icon,
-        text = self:getStatusText(),
-        short_text = self:getShortStatusText(),
-    }))
-    local footer = self.ui and self.ui.view and self.ui.view.footer
-    if footer then
-        if type(footer.onUpdateFooter) == "function" then
-            pcall(function() footer:onUpdateFooter(true) end)
-        elseif type(footer.updateFooter) == "function" then
-            pcall(function() footer:updateFooter(true) end)
-        end
-    end
-end
-
-function ReadQuest:onReaderReady()
-    self.last_page = nil
-    self.last_time = os.time()
-    self:hookStatusBar()
-    self:refreshStatusBar()
-end
-
-function ReadQuest:onCloseDocument()
-    self:hideToast()
-    self.popq, self.pending = {}, {}
-    if self.popup then pcall(function() self.popup:dismiss() end) end
-    local ok, status = pcall(function()
-        local summary = self.ui.doc_settings and self.ui.doc_settings:readSetting("summary")
-        return summary and summary.status
-    end)
-    if ok and status == "complete" then
-        local book = self:currentBook(false)
-        if book and not book.defeated then
-            self:withLevelCheck(function() self:checkBoss(nil, true) end)
-        end
-    end
-    self:save()
-end
-
--- --- mở giao diện ------------------------------------------------------
-function ReadQuest:openHub(screen)
-    if self.hub then return end
-    self:hideToast()
-    if not self.ui.document then self:load() end
-    local ok, hub = pcall(function()
-        return UI.Hub:new{ plugin = self, screen = screen or "home" }
-    end)
-    if not ok or not hub then
-        UIManager:show(InfoMessage:new{ text = self:t("ui_error", tostring(hub)) })
-        return
-    end
-    self.hub = hub
-    hub.on_close = function()
-        self.hub = nil
-        self:save()
-    end
-    UIManager:show(hub, "flashui")
-end
-
--- --- ngày & chuỗi ------------------------------------------------------
-function ReadQuest:rollDay()
-    local st = self.state
-    local d = Core.today_str()
-    if st.today.date ~= d then
-        st.today = { date = d, pages = 0, done = false }
-        self.dirty = true
-    end
-end
-
-function ReadQuest:effectiveStreak()
-    local st = self.state
-    if st.last_goal_date == Core.today_str() or st.last_goal_date == Core.yesterday_str() then
-        return st.streak
-    end
-    return 0
-end
-
--- --- thông tin sách ----------------------------------------------------
-function ReadQuest:totalPages()
-    local doc = self.ui.document
-    if not doc then return nil end
-    local ok, n = pcall(function() return doc:getPageCount() end)
-    if ok and type(n) == "number" and n > 0 then return n end
-    return nil
-end
-
-function ReadQuest:curPage()
-    if self.last_page then return self.last_page end
-    local ui = self.ui
-    if ui.paging and ui.paging.current_page then return ui.paging.current_page end
-    if ui.rolling and ui.rolling.current_page then return ui.rolling.current_page end
-    if ui.document then
-        local ok, p = pcall(function() return ui.document:getCurrentPage() end)
-        if ok and type(p) == "number" then return p end
-    end
-    return nil
-end
-
-function ReadQuest:bookTitle()
-    local doc = self.ui.document
-    local title
-    local ok, props = pcall(function() return doc:getProps() end)
-    if ok and type(props) == "table" then title = props.title end
-    if (not title or title == "") and self.ui.doc_settings then
-        local dp = self.ui.doc_settings:readSetting("doc_props")
-        if type(dp) == "table" then title = dp.title end
-    end
-    if not title or title == "" then
-        title = (doc.file or "?"):match("([^/]+)$") or "?"
-        title = title:gsub("%.[^.]+$", "")
-    end
-    return title
-end
-
-function ReadQuest:currentBook(create)
-    local doc = self.ui.document
-    if not (doc and doc.file) then return nil end
-    local books = self.state.bosses
-    local b = books[doc.file]
-    if not b and create then
-        b = { title = self:bookTitle(), pages = 0, defeated = false, ms = 0, first = Core.today_str() }
-        books[doc.file] = b
     end
     return b
 end
 
-function ReadQuest:bossInfo()
-    if not self.ui.document then return nil end
-    local total = self:totalPages() or 1
-    local page = math.max(1, math.min(self:curPage() or 1, total))
-    local book = self:currentBook(false)
-    local title = book and book.title or self:bookTitle()
-    local defeated = book and book.defeated or false
+function Core.recordHistory(st, opts)
+    opts = opts or {}
+    local ym = os.date("%Y-%m")
+    local yr = os.date("%Y")
+    local hr = tonumber(os.date("%H")) or 12
+    st.months = st.months or {}
+    st.years = st.years or {}
+    st.months[ym] = normalizeBucket(st.months[ym])
+    st.years[yr] = normalizeBucket(st.years[yr])
+
+    local pages = tonumber(opts.pages) or 0
+    local secs = tonumber(opts.seconds) or 0
+    local exp = tonumber(opts.exp) or 0
+    local bkey = opts.book_key
+    local btitle = opts.book_title
+
+    for _, bucket in ipairs({ st.months[ym], st.years[yr] }) do
+        bucket.pages = bucket.pages + pages
+        bucket.seconds = bucket.seconds + secs
+        bucket.exp = bucket.exp + exp
+        if pages > 0 or secs > 0 then
+            bucket.hours[hr] = (bucket.hours[hr] or 0) + math.max(1, pages)
+        end
+        if bkey and (pages > 0 or secs > 0 or exp > 0) then
+            local bk = bucket.books[bkey] or {
+                title = btitle or bkey, pages = 0, seconds = 0, exp = 0, hours = {},
+            }
+            bk.title = btitle or bk.title
+            bk.pages = (tonumber(bk.pages) or 0) + pages
+            bk.seconds = (tonumber(bk.seconds) or 0) + secs
+            bk.exp = (tonumber(bk.exp) or 0) + exp
+            bk.hours = bk.hours or {}
+            if pages > 0 or secs > 0 then
+                bk.hours[hr] = (tonumber(bk.hours[hr]) or 0) + math.max(1, pages)
+            end
+            bucket.books[bkey] = bk
+        end
+    end
+end
+
+function Core.formatSlotRange(hr)
+    hr = tonumber(hr)
+    if not hr then return "--" end
+    local h1 = hr % 24
+    local h2 = (hr + 1) % 24
+    return string.format("%02d:00–%02d:00", h1, h2)
+end
+
+function Core.computeRecap(st, mode, key)
+    mode = (mode == "year") and "year" or "month"
+    local now_ym = os.date("%Y-%m")
+    local now_yr = os.date("%Y")
+    local target_key = key or (mode == "year" and now_yr or now_ym)
+
+    local bucket
+    if mode == "year" then
+        bucket = st.years and st.years[target_key]
+    else
+        bucket = st.months and st.months[target_key]
+    end
+
+    local top_book, top_pages = nil, 0
+    local best_hour, best_hour_score = nil, 0
+    local total_pages, total_seconds, total_exp = 0, 0, 0
+    local books = {}
+
+    if type(bucket) == "table" then
+        total_pages = tonumber(bucket.pages) or 0
+        total_seconds = tonumber(bucket.seconds) or 0
+        total_exp = tonumber(bucket.exp) or 0
+        if type(bucket.books) == "table" then
+            for key_id, bk in pairs(bucket.books) do
+                local p = tonumber(bk.pages) or 0
+                local secs = tonumber(bk.seconds) or 0
+                local exp = tonumber(bk.exp) or 0
+                local title = tostring(bk.title or key_id)
+                local book_hours = bk.hours or {}
+                local book_best_hour, book_best_score = nil, 0
+                for h = 0, 23 do
+                    local score = tonumber(book_hours[h]) or 0
+                    if score > book_best_score then
+                        book_best_hour, book_best_score = h, score
+                    end
+                end
+                local boss = st.bosses and st.bosses[key_id] or nil
+                books[#books + 1] = {
+                    key = key_id,
+                    title = title,
+                    pages = p,
+                    seconds = secs,
+                    exp = exp,
+                    best_hour = book_best_hour,
+                    best_slot = book_best_hour ~= nil and Core.formatSlotRange(book_best_hour) or nil,
+                    defeated = boss and boss.defeated and true or false,
+                    defeated_date = boss and boss.date or nil,
+                    lifetime_pages = boss and (tonumber(boss.pages) or 0) or p,
+                }
+                if p > top_pages then
+                    top_pages, top_book = p, title
+                end
+            end
+        end
+        if type(bucket.hours) == "table" then
+            for h = 0, 23 do
+                local score = tonumber(bucket.hours[h]) or 0
+                if score > best_hour_score then
+                    best_hour_score, best_hour = score, h
+                end
+            end
+        end
+    end
+
+    -- Older saves may predate the per-book period history. Do not invent time
+    -- data, but keep their tracked titles visible in the current-period recap.
+    if total_pages == 0 and total_seconds == 0
+        and target_key == (mode == "year" and now_yr or now_ym)
+        and #books == 0 and type(st.bosses) == "table" then
+        for key_id, boss in pairs(st.bosses) do
+            local p = tonumber(boss.pages) or 0
+            if p > 0 or boss.defeated then
+                books[#books + 1] = {
+                    key = key_id,
+                    title = tostring(boss.title or key_id),
+                    pages = p,
+                    seconds = 0,
+                    exp = 0,
+                    best_hour = nil,
+                    best_slot = nil,
+                    defeated = boss.defeated and true or false,
+                    defeated_date = boss.date,
+                    lifetime_pages = p,
+                }
+                if p > top_pages then top_pages, top_book = p, tostring(boss.title or key_id) end
+            end
+        end
+        if #books > 0 then
+            total_pages = tonumber(st.pages) or 0
+            total_seconds = tonumber(st.seconds) or 0
+            total_exp = tonumber(st.exp) or 0
+        end
+    end
+
+    table.sort(books, function(a, b)
+        if a.pages ~= b.pages then return a.pages > b.pages end
+        if a.seconds ~= b.seconds then return a.seconds > b.seconds end
+        return tostring(a.title):lower() < tostring(b.title):lower()
+    end)
+
+    local prefix = mode == "year" and tostring(target_key) or tostring(target_key)
+    local achievement_count, defeated_count = 0, 0
+    for _, date in pairs(st.ach or {}) do
+        if type(date) == "string" and date:sub(1, #prefix) == prefix then
+            achievement_count = achievement_count + 1
+        end
+    end
+    for _, boss in pairs(st.bosses or {}) do
+        local date = boss and boss.date
+        if boss and boss.defeated and type(date) == "string" and date:sub(1, #prefix) == prefix then
+            defeated_count = defeated_count + 1
+        end
+    end
+
+    local best_streak = tonumber(st.best_streak) or tonumber(st.streak) or 0
     return {
-        title = title, total = total, page = page,
-        credited = book and book.pages or 0,
-        defeated = defeated, date = book and book.date,
-        hp = defeated and 0 or math.max(0, 1 - page / total),
-        need = Core.bossMinPages(total),
-        variant = Core.bossVariant(title),
+        mode = mode,
+        period = target_key,
+        top_book = top_book,
+        top_book_pages = top_pages,
+        books = books,
+        book_count = #books,
+        achievement_count = achievement_count,
+        defeated_count = defeated_count,
+        total_seconds = total_seconds,
+        total_hours = total_seconds / 3600,
+        total_pages = total_pages,
+        total_exp = total_exp,
+        best_hour = best_hour,
+        best_slot = best_hour ~= nil and Core.formatSlotRange(best_hour) or nil,
+        best_streak = best_streak,
     }
 end
 
--- --- thông báo nhỏ góc phải dưới (+EXP) ---------------------------------
-function ReadQuest:showToast(main, detail)
-    self:hideToast()
-    local ok, t = pcall(function() return UI.Toast:new{ text = main, detail = detail } end)
-    if not ok or not t then return end
-    self._toast = t
-    UIManager:show(t, "ui", t.dimen)
-    local secs = tonumber(self.state.cfg.toast_secs) or 2
-    self._toast_timer = function() self:hideToast() end
-    UIManager:scheduleIn(secs, self._toast_timer)
+function Core.normalize(st)
+    if type(st) ~= "table" then st = {} end
+    local numbers = { "exp", "pages", "seconds", "streak", "best_streak",
+                      "defeated", "night_pages", "dawn_pages" }
+    for _, k in ipairs(numbers) do st[k] = tonumber(st[k]) or 0 end
+    st.last_goal_date = type(st.last_goal_date) == "string" and st.last_goal_date or ""
+    st.last_ach_id = type(st.last_ach_id) == "string" and st.last_ach_id or nil
+    if type(st.today) ~= "table" then st.today = {} end
+    st.today.date = st.today.date or ""
+    st.today.pages = tonumber(st.today.pages) or 0
+    st.today.done = st.today.done and true or false
+    if type(st.bosses) ~= "table" then st.bosses = {} end
+    if type(st.loot) ~= "table" then st.loot = {} end
+    if type(st.ach) ~= "table" then st.ach = {} end
+    if type(st.months) ~= "table" then st.months = {} end
+    for k, v in pairs(st.months) do st.months[k] = normalizeBucket(v) end
+    if type(st.years) ~= "table" then st.years = {} end
+    for k, v in pairs(st.years) do st.years[k] = normalizeBucket(v) end
+    if type(st.cfg) ~= "table" then st.cfg = {} end
+    for k, v in pairs(Core.DEFAULT_CFG) do
+        if st.cfg[k] == nil then st.cfg[k] = v end
+    end
+    if (tonumber(st.cfg.ver) or 1) < 2 then
+        st.cfg.toast = true
+        st.cfg.ver = 2
+    end
+    return st
 end
 
-function ReadQuest:hideToast()
-    if self._toast_timer then
-        UIManager:unschedule(self._toast_timer)
-        self._toast_timer = nil
-    end
-    local t = self._toast
-    if t then
-        self._toast = nil
-        pcall(function() UIManager:close(t, "partial", t.dimen) end)
-    end
-end
-
--- --- bảng chúc mừng ----------------------------------------------------
-function ReadQuest:push(entry, front)
-    if front then table.insert(self.pending, 1, entry) else table.insert(self.pending, entry) end
-end
-
-function ReadQuest:flushMessages()
-    if #self.pending == 0 then return end
-    for _, e in ipairs(self.pending) do table.insert(self.popq, e) end
-    self.pending = {}
-    UIManager:scheduleIn(0.7, function() self:nextPopup() end)
-end
-
-function ReadQuest:nextPopup()
-    if self.popup or #self.popq == 0 then return end
-    local e = table.remove(self.popq, 1)
-    local ok, p = pcall(function() return UI.Popup:new{ entry = e, lang = self:lang() } end)
-    if not ok or not p then
-        UIManager:show(InfoMessage:new{
-            text = tostring(e.title) .. "\n" .. tostring(e.sub or "") .. "\n" .. tostring(e.note or ""),
-            timeout = 5,
-        })
-        UIManager:scheduleIn(0.5, function() self:nextPopup() end)
-        return
-    end
-    self.popup = p
-    p.on_close = function()
-        self.popup = nil
-        UIManager:scheduleIn(0.4, function() self:nextPopup() end)
-    end
-    p.timer = function() p:dismiss() end
-    UIManager:show(p, "ui", p.dimen)
-    UIManager:scheduleIn(e.timeout or 7, p.timer)
-end
-
-function ReadQuest:withLevelCheck(fn)
-    local st = self.state
-    local lang = self:lang()
-    local lv0 = Core.levelInfo(st.exp)
-    fn()
-    self:checkAchievements()
-    local lv1 = Core.levelInfo(st.exp)
-    if lv1 > lv0 then
-        local promoted = Core.titleIndex(lv1) ~= Core.titleIndex(lv0)
-        self:push({
-            icon = Core.titleIcon(lv1),
-            title = self:t("pop_levelup", lv1),
-            sub = Core.titleOf(lv1, lang),
-            note = promoted and self:t("pop_promoted") or nil,
-        }, true)
-    end
-    self.dirty = true
-    self:refreshStatusBar()
-    if #self.pending > 0 then
-        self:save()
-        self:flushMessages()
-    end
-end
-
-function ReadQuest:checkAchievements()
-    local st = self.state
-    local lang = self:lang()
-    for _ = 1, 4 do
-        local changed = false
-        for _, a in ipairs(Core.ACHIEVEMENTS) do
-            if not st.ach[a.id] and a.test(st) then
-                st.ach[a.id] = Core.today_str()
-                st.last_ach_id = a.id
-                st.exp = st.exp + Core.ACH_EXP
-                local aname, adesc = I18N.achInfo(lang, a.id)
-                self:push({
-                    icon = a.icon, title = self:t("pop_ach"), sub = aname,
-                    note = string.format("%s\n+%d EXP", adesc, Core.ACH_EXP),
-                })
-                changed = true
-            end
-        end
-        if not changed then break end
-    end
-end
-
--- --- cốt lõi: tính EXP cho mỗi trang -----------------------------------
-function ReadQuest:onPageUpdate(pageno)
-    if not (self.ui.document and type(pageno) == "number") then return end
-    local now = os.time()
-    local last_page, last_time = self.last_page, self.last_time
-    self.last_page, self.last_time = pageno, now
-
-    if last_page and last_time then
-        local dt = now - last_time
-        local step = pageno - last_page
-        local cfg = self.state.cfg
-        if step >= 1 and step <= 2 and dt >= cfg.min_secs and dt <= cfg.max_secs then
-            self:creditPage(dt, pageno)
-        end
-    end
-    self:maybeDefeatBoss(pageno)
-end
-
-function ReadQuest:creditPage(dt, pageno)
-    local st = self.state
-    local lang = self:lang()
-    self:rollDay()
-    local gain, milestone
-    self:withLevelCheck(function()
-        local streak = self:effectiveStreak()
-        gain = math.floor(Core.BASE_EXP * (1 + 0.05 * math.min(streak, 10)) + 0.5)
-        st.exp = st.exp + gain
-        st.pages = st.pages + 1
-        st.seconds = st.seconds + dt
-        st.today.pages = st.today.pages + 1
-
-        local hour = tonumber(os.date("%H")) or 12
-        if hour < 5 then
-            st.night_pages = st.night_pages + 1
-        elseif hour < 7 then
-            st.dawn_pages = st.dawn_pages + 1
-        end
-
-        local book = self:currentBook(true)
-        if book then
-            book.pages = book.pages + 1
-            milestone = self:bossMilestone(book, pageno)
-        end
-
-        if not st.today.done and st.today.pages >= st.cfg.goal then
-            self:completeDaily()
-        end
-    end)
-
-    if st.cfg.toast and gain then
-        local lv, rem, need = Core.levelInfo(st.exp)
-        local detail
-        if st.cfg.toast_detail then
-            detail = self:t("toast_detail_fmt", lv, math.floor(rem / need * 100))
-        end
-        if milestone then
-            detail = (detail and (detail .. "  •  ") or "") .. milestone
-        end
-        self:showToast("+" .. gain .. " EXP", detail)
-    end
-    if st.pages % 10 == 0 then self:save() end
-end
-
-function ReadQuest:completeDaily()
-    local st = self.state
-    local d, y = Core.today_str(), Core.yesterday_str()
-    st.today.done = true
-    if st.last_goal_date == y then
-        st.streak = st.streak + 1
-    elseif st.last_goal_date ~= d then
-        st.streak = 1
-    end
-    st.last_goal_date = d
-    st.best_streak = math.max(st.best_streak, st.streak)
-    local bonus = 100 + 10 * math.min(st.streak, 30)
-    st.exp = st.exp + bonus
-    self:push({
-        icon = "flame", title = self:t("pop_daily"),
-        sub = self:t("streak_fmt", st.streak),
-        note = self:t("pop_daily_note", st.today.pages, bonus),
-    })
-end
-
--- --- boss --------------------------------------------------------------
-function ReadQuest:bossMilestone(book, pageno)
-    if book.defeated then return nil end
-    local total = self:totalPages()
-    if not total then return nil end
-    local pct = pageno / total
-    local hit
-    for _, m in ipairs(Core.MILESTONES) do
-        if pct >= m and (book.ms or 0) < m then hit = m end
-    end
-    if hit then
-        book.ms = hit
-        return self:t("boss_hp_toast", math.floor((1 - hit) * 100 + 0.5))
-    end
-    return nil
-end
-
-function ReadQuest:maybeDefeatBoss(pageno)
-    local book = self:currentBook(false)
-    if not book or book.defeated then return end
-    local total = self:totalPages()
-    if not total then return end
-    if pageno / total >= Core.BOSS_END_RATIO and book.pages >= Core.bossMinPages(total) then
-        self:withLevelCheck(function() self:checkBoss(pageno, false) end)
-    end
-end
-
-function ReadQuest:checkBoss(pageno, force)
-    local book = self:currentBook(false)
-    if not book or book.defeated then return false end
-    local total = self:totalPages() or 1
-    if book.pages < Core.bossMinPages(total) then return false end
-    if not force then
-        if not pageno or pageno / total < Core.BOSS_END_RATIO then return false end
-    end
-
-    local st = self.state
-    local lang = self:lang()
-    book.defeated = true
-    book.date = Core.today_str()
-    st.defeated = st.defeated + 1
-
-    local bonus = 200 + book.pages * 5
-    st.exp = st.exp + bonus
-    local item = Core.rollLoot(book.pages / total, lang)
-    item.from = book.title
-    item.date = Core.today_str()
-    table.insert(st.loot, item)
-
-    self:push({
-        icon = "monster" .. Core.bossVariant(book.title),
-        icon2 = Core.RARITY_ICON[item.rarity],
-        title = self:t("pop_boss"),
-        sub = Core.bossName(book.title, lang),
-        note = self:t("pop_boss_note", bonus, I18N.rarityLabel(lang, item.rarity), item.name),
-    })
-    return true
-end
-
-return ReadQuest
+return Core
