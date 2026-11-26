@@ -15,6 +15,7 @@ Turn your reading sessions into a lightweight RPG adventure. ReadQuest tracks va
 ## Screenshots
 
 <table>
+  <img width="1072" height="1448" alt="ReadQuest_Weekly_Challenge_2026-11-26_165951" src="https://github.com/user-attachments/assets/278b3b9c-8552-40d6-8425-4ca452757428" />
   <tr>
     <td align="center"><img src="https://github.com/user-attachments/assets/21ec5261-2816-465e-ada1-85fc00c08876" alt="ReadQuest Popup" width="240" /></td>
     <td align="center"><img src="https://github.com/user-attachments/assets/6c55cff7-9d59-425f-b1c3-8f1d698a48cf" alt="KOReader Reader" width="240" /></td>
