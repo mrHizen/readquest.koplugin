@@ -15,8 +15,8 @@ Turn your reading sessions into a lightweight RPG adventure. ReadQuest tracks va
 ## Screenshots
 
 <table>
-  <img width="1072" height="1448" alt="ReadQuest_Weekly_Challenge_2026-11-26_165951" src="https://github.com/user-attachments/assets/278b3b9c-8552-40d6-8425-4ca452757428" />
   <tr>
+    <td align="center"><img src="https://github.com/user-attachments/assets/278b3b9c-8552-40d6-8425-4ca452757428" alt="ReadQuest Popup" width="240" /></td>
     <td align="center"><img src="https://github.com/user-attachments/assets/21ec5261-2816-465e-ada1-85fc00c08876" alt="ReadQuest Popup" width="240" /></td>
     <td align="center"><img src="https://github.com/user-attachments/assets/6c55cff7-9d59-425f-b1c3-8f1d698a48cf" alt="KOReader Reader" width="240" /></td>
     <td align="center"><img src="https://github.com/user-attachments/assets/55909bd5-564d-4c3a-8a62-7408e14f07ba" alt="ReadQuest Popup" width="240" /></td>
@@ -34,6 +34,8 @@ Turn your reading sessions into a lightweight RPG adventure. ReadQuest tracks va
   <tr>
     <td align="center"><img src="https://github.com/user-attachments/assets/7b453bf3-cde9-460e-84db-6fd933960f70" alt="ReadQuest Screen" width="240" /></td>
     <td align="center"><img src="https://github.com/user-attachments/assets/7e072533-5db0-4f72-8ff2-92a450acef3f" alt="ReadQuest Screen" width="240" /></td>
+    <td align="center"><img src="https://github.com/user-attachments/assets/73e61075-9424-4b23-92ac-3b66646841eb" alt="ReadQuest Screen" width="240" /></td>
+    <td align="center"><img src="https://github.com/user-attachments/assets/fd4d7845-eef4-4033-9794-318c15b1fe06" alt="ReadQuest Screen" width="240" /></td>
     <td></td>
   </tr>
 </table>
